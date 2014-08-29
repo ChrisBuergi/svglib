@@ -1108,8 +1108,8 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 group.skew(values, 0)
             elif op == "skewY":
                 group.skew(0, values)
-            elif op == "matrix":
-                group.transform = values
+            elif op == "matrix" and len(values) == 6:
+                group.transform = mmult(group.transform, values)
             else:
                 if LOGMESSAGES:
                     print "Ignoring transform:", op, values
