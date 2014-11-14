@@ -29,6 +29,7 @@ from reportlab.graphics.shapes import *
 from reportlab.graphics import renderPDF
 from reportlab.lib import colors
 from reportlab.lib.units import cm, inch, mm, pica, toLength
+from reportlab import rl_config
 
 
 __version__ = "0.6.3"
@@ -39,6 +40,8 @@ __date__ = "2010-03-01"
 
 pt = 1
 LOGMESSAGES = 0
+# Set shapeChecking to False so we can set any attibute on shape without getting an exception.
+rl_config.shapeChecking = False
 
 
 ### helpers ###
@@ -437,6 +440,12 @@ class Svg2RlgAttributeConverter(AttributeConverter):
 
         return fontName
 
+    def convertFontWeight(self, svgAttr):
+        return svgAttr
+
+    def convertFontStyle(self, svgAttr):
+        return svgAttr
+
 
 class NodeTracker:
     """An object wrapper keeping track of arguments to certain method calls.
@@ -797,6 +806,7 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
         x, y = map(self.attrConv.convertLength, (x, y))
         shape = String(x, y, text)
         self.applyStyleOnShape(shape, node)
+        self.updateFontFamily(shape)
         gr = Group()
         gr.add(shape)
         gr.scale(1, -1)
@@ -864,7 +874,7 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
             self.applyStyleOnShape(shape, node)
             if c.nodeType == c.ELEMENT_NODE and c.nodeName == "tspan":
                 self.applyStyleOnShape(shape, c)
-
+            self.updateFontFamily(shape)
             gr.add(shape)
 
         gr.scale(1, -1)
@@ -1133,6 +1143,8 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
         )
         mappingF = (
             ("font-family", "fontName", "convertFontFamily", "Helvetica"),
+            ("font-weight", "fontWeight", "convertFontWeight", ""),
+            ("font-style",  "fontStyle", "convertFontStyle", ""),
             ("font-size", "fontSize", "convertLength", "12"),
             ("text-anchor", "textAnchor", "id", "start"),
         )
@@ -1155,6 +1167,24 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
             if shape.__class__ == String:
                 svgAttr = ac.findAttr(node, "fill") or "black"
                 setattr(shape, "fillColor", ac.convertColor(svgAttr))
+
+
+    def updateFontFamily(self, shape):
+        fontName = getattr(shape, 'fontName', None)
+        if fontName:
+            appendix = ''
+            fontWeight = getattr(shape, 'fontWeight', '')
+            fontStyle = getattr(shape, 'fontStyle', '')
+
+            if fontWeight == 'bold':
+                appendix += 'Bold'
+            if fontStyle == 'italic':
+                if fontName in ['Helvetica', 'Courier']:
+                    appendix += 'Oblique'
+                else:
+                    appendix += 'Italic'
+            if len(appendix) > 0:
+                setattr(shape, 'fontName', fontName + '-' + appendix)
 
 
 def svg2rlg(path):
