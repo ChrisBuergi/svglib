@@ -425,6 +425,7 @@ class Svg2RlgAttributeConverter(AttributeConverter):
 
     def convertFontFamily(self, svgAttr):
         # very hackish
+        print svgAttr
         fontMapping = {"sans-serif":"Helvetica", 
                        "serif":"Times-Roman", 
                        "monospace":"Courier"}
