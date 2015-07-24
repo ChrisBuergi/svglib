@@ -24,13 +24,15 @@ import operator
 import gzip
 import xml.dom.minidom 
 
+from math import sqrt, sin, cos, atan2, pi
+
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.graphics.shapes import *
 from reportlab.graphics import renderPDF
 from reportlab.lib import colors
 from reportlab.lib.units import cm, inch, mm, pica, toLength
-from reportlab import rl_config
-
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 __version__ = "0.6.3"
 __license__ = "LGPL 3"
@@ -40,8 +42,6 @@ __date__ = "2010-03-01"
 
 pt = 1
 LOGMESSAGES = 0
-# Set shapeChecking to False so we can set any attibute on shape without getting an exception.
-rl_config.shapeChecking = False
 
 
 ### helpers ###
@@ -179,15 +179,89 @@ def normaliseSvgPath(attr):
     # same for m and l.
     for i in xrange(0, len(res), 2):
         op, nums = res[i:i+2]
-        for j in xrange(i+2, len(res), 2):
-            if op == 'M' == res[j]:
-                res[j] = 'L'
-            elif op == 'm' == res[j]:
-                res[j] = 'l'
-            else:
-                break
+        if i >= 2:
+            if op == 'M' == res[i-2]:
+                res[i] = 'L'
+            elif op == 'm' == res[i-2]:
+                res[i] = 'l'
 
     return res
+
+
+def plot_arc( sx, sy, rx, ry, x_axis_rotation, large, sweep, x, y ):
+    th = x_axis_rotation * (pi / 180)
+    rx = abs( rx )
+    ry = abs( ry )
+
+    px = cos( th ) * (sx - x) * 0.5 + sin( th ) * (sy - y) * 0.5
+    py = cos( th ) * (sy - y) * 0.5 - sin( th ) * (sx - x) * 0.5
+    pl = ( px * px ) / ( rx * rx ) + ( py * py ) / ( ry * ry )
+    if ( pl > 1 ):
+        pl = sqrt( pl )
+        rx *= pl
+        ry *= pl
+
+    x0 = (  cos( th ) / rx ) * sx + ( sin( th ) / rx ) * sy
+    y0 = ( -sin( th ) / ry ) * sx + ( cos( th ) / ry ) * sy
+    x1 = (  cos( th ) / rx ) *  x + ( sin( th ) / rx ) *  y
+    y1 = ( -sin( th ) / ry ) *  x + ( cos( th ) / ry ) *  y
+
+    d = ( x1 - x0 ) * ( x1 - x0 ) + ( y1 - y0 ) * ( y1 - y0 )
+
+    # if we don't have d, then there is no movement
+    if not d: return [[ x, y ]]
+
+    sfactor_sq = 1 / d - 0.25
+    if ( sfactor_sq < 0 ): sfactor_sq = 0
+    sfactor = sqrt( sfactor_sq )
+    if ( sweep == large ): sfactor = -sfactor
+
+    xc = 0.5 * ( x0 + x1 ) - sfactor * ( y1 - y0 )
+    yc = 0.5 * ( y0 + y1 ) + sfactor * ( x1 - x0 )
+
+    th0 = atan2( y0 - yc, x0 - xc )
+    th1 = atan2( y1 - yc, x1 - xc )
+
+    cx = ( sx + x ) / 2
+    cy = ( sy + y ) / 2
+
+    adx = -cos( th1 ) * rx
+    ady = -sin( th1 ) * ry
+
+    degreedelta = 1
+    if sweep:
+        startangle  = th0
+        endangle    = th1
+    else:
+        startangle  = th1
+        endangle    = th0
+
+    while ( endangle < startangle ):
+        endangle = endangle + 2 * pi
+
+    angle = endangle - startangle
+
+    n = 1
+    rdelta = 0
+    if angle > 0.001:
+        degreedelta = min( angle, degreedelta or 1 )
+        rdelta = degreedelta * (pi / 180)
+        n = max( int( angle / rdelta + 0.5 ), 1 )
+        rdelta = angle / n
+        n += 1
+
+    points = [];
+    for i in xrange(n):
+        angle = startangle + i * rdelta
+        points.append([
+            x + adx + rx * cos(angle),
+            y + ady + ry * sin(angle)
+        ])
+
+    if not sweep:
+        points.reverse()
+
+    return points
 
 
 ### attribute converters (from SVG to RLG)
@@ -317,7 +391,7 @@ class AttributeConverter:
 class Svg2RlgAttributeConverter(AttributeConverter):
     "A concrete SVG to RLG attribute converter."
 
-    def convertLength(self, svgAttr, percentOf=100):
+    def convertLength(self, svgAttr, percentOf=100, emSize=None):
         "Convert length to points."
 
         text = svgAttr
@@ -330,6 +404,8 @@ class Svg2RlgAttributeConverter(AttributeConverter):
             return float(text[:-1]) / 100 * percentOf
         elif text[-2:] == "pc":
             return float(text[:-2]) * pica
+        elif emSize and text[-2:] == 'em':
+            return float(text[:-2]) * emSize
 
         newSize = text[:]
         for u in "em ex px".split():
@@ -356,7 +432,7 @@ class Svg2RlgAttributeConverter(AttributeConverter):
         return a
 
 
-    def convertColor(self, svgAttr):
+    def convertColor(self, svgAttr, alpha=1):
         "Convert string to a RL color object."
 
         # fix it: most likely all "web colors" are allowed
@@ -374,15 +450,17 @@ class Svg2RlgAttributeConverter(AttributeConverter):
             text = text.encode("ASCII")
         except:
             pass
+        
+        ret = None
 
         if text in predefined.split():
-            return getattr(colors, text)
+            ret = getattr(colors, text)
         elif text == "currentColor":
-            return "currentColor"
+            ret = "currentColor"
         elif len(text) == 7 and text[0] == '#':
-            return colors.HexColor(text)
+            ret = colors.HexColor(text)
         elif len(text) == 4 and text[0] == '#':
-            return colors.HexColor('#' + 2*text[1] + 2*text[2] + 2*text[3])
+            ret = colors.HexColor('#' + 2*text[1] + 2*text[2] + 2*text[3])
         elif text[:3] == "rgb" and text.find('%') < 0:
             t = text[:][3:]
             t = t.replace('%', '')
@@ -390,19 +468,21 @@ class Svg2RlgAttributeConverter(AttributeConverter):
             tup = map(lambda h:h[2:], map(hex, tup))
             tup = map(lambda h:(2-len(h))*'0'+h, tup)
             col = "#%s%s%s" % tuple(tup)
-            return colors.HexColor(col)
+            ret = colors.HexColor(col)
         elif text[:3] == 'rgb' and text.find('%') >= 0:
             t = text[:][3:]
             t = t.replace('%', '')
             tup = eval(t)
             tup = map(lambda c:c/100.0, tup)
             col = apply(colors.Color, tup)
-            return col
+            ret = col
 
-        if LOGMESSAGES:
+        if ret is not None:
+            ret.alpha = alpha
+        elif LOGMESSAGES:
             print "Can't handle color:", text
 
-        return None
+        return ret
 
 
     def convertLineJoin(self, svgAttr):
@@ -425,7 +505,7 @@ class Svg2RlgAttributeConverter(AttributeConverter):
 
     def convertFontFamily(self, svgAttr):
         # very hackish
-        print svgAttr
+        #print svgAttr
         fontMapping = {"sans-serif":"Helvetica", 
                        "serif":"Times-Roman", 
                        "monospace":"Courier"}
@@ -436,16 +516,13 @@ class Svg2RlgAttributeConverter(AttributeConverter):
             fontName = fontMapping[fontName]
         except KeyError:
             pass
+        #print "so far %s" % fontName
         if fontName not in ("Helvetica", "Times-Roman", "Courier"):
-            fontName = "Helvetica"
+            pdfmetrics.registerFont(TTFont(fontName, '%s.ttf' % fontName))
+            #fontName = "Helvetica"
+        #print "Becomes %s " % fontName
 
         return fontName
-
-    def convertFontWeight(self, svgAttr):
-        return svgAttr
-
-    def convertFontStyle(self, svgAttr):
-        return svgAttr
 
 
 class NodeTracker:
@@ -807,7 +884,6 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
         x, y = map(self.attrConv.convertLength, (x, y))
         shape = String(x, y, text)
         self.applyStyleOnShape(shape, node)
-        self.updateFontFamily(shape)
         gr = Group()
         gr.add(shape)
         gr.scale(1, -1)
@@ -819,72 +895,69 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
     def convertText(self, node):
         attrConv = self.attrConverter
         getAttr = node.getAttribute
-        x, y = map(getAttr, ('x', 'y'))
-        x, y = map(attrConv.convertLength, (x, y))
-
+        x0 = attrConv.convertLength( getAttr('x') )
+        y0 = attrConv.convertLength( getAttr('y') )
         gr = Group()
 
         text = ''
-        chNum = len(node.childNodes)
-        frags = []
         fragLengths = []
 
-        dx0, dy0 = 0, 0
-        x1, y1 = 0, 0
-        ff = attrConv.findAttr(node, "font-family") or "Helvetica"
-        ff = ff.encode("ASCII")
-        ff = attrConv.convertFontFamily(ff)
-        fs = attrConv.findAttr(node, "font-size") or "12"
-        fs = fs.encode("ASCII")
-        fs = attrConv.convertLength(fs)
+        ffamily = attrConv.findAttr(node, "font-family").encode("ASCII") or "Helvetica"
+        ffamily = attrConv.convertFontFamily(ffamily)
+        fsize = attrConv.findAttr(node, "font-size").encode("ASCII") or "12"
+        fsize = attrConv.convertLength(fsize)
+
+        baseLines = { "sub":-fsize/2, "super":fsize/2, "baseline":0 }
+
+        dx0 = attrConv.convertLength( getAttr('dx'), emSize=fsize )
+        dy0 = attrConv.convertLength( getAttr('dy'), emSize=fsize )
+
         for c in node.childNodes:
             dx, dy = 0, 0
+            x, y = 0, 0
             baseLineShift = 0
+
             if c.nodeType == c.TEXT_NODE:
-                frags.append(c.nodeValue)
-                try:
-                    tx = ''.join([chr(ord(f)) for f in frags[-1]])
-                except ValueError:
-                    tx = "Unicode"
+                text = c.nodeValue
+
             elif c.nodeType == c.ELEMENT_NODE and c.nodeName == "tspan":
-                frags.append(c.firstChild.nodeValue)
-                tx = ''.join([chr(ord(f)) for f in frags[-1]])
-                getAttr = c.getAttribute
-                x1 = getAttr('x')
-                x1 = attrConv.convertLength(x1)
-                y1 = getAttr('y')
-                y1 = attrConv.convertLength(y1)
-                dx, dy = map(getAttr, ("dx", "dy"))
-                dx, dy = map(attrConv.convertLength, (dx, dy))
-                dx0 = dx0 + dx
-                dy0 = dy0 + dy
-                baseLineShift = getAttr("baseline-shift") or '0'
-                if baseLineShift in ("sub", "super", "baseline"):
-                    baseLineShift = {"sub":-fs/2, "super":fs/2, "baseline":0}[baseLineShift]
-                else:
-                    baseLineShift = attrConv.convertLength(baseLineShift, fs)
+                text = u''
+                if c.firstChild: text = c.firstChild.nodeValue
+                y = attrConv.convertLength( c.getAttribute('y'), emSize=fsize )
+                x = attrConv.convertLength( c.getAttribute('x'), emSize=fsize )
+                dx += attrConv.convertLength( c.getAttribute('dx'), emSize=fsize )
+                dy += attrConv.convertLength( c.getAttribute('dy'), emSize=fsize )
+                baseLineShift = c.getAttribute("baseline-shift") or 0
+                if baseLineShift in baseLines:
+                    baseLineShift = baseLines[baseLineShift]
+                elif baseLineShift:
+                    baseLineShift = attrConv.convertLength(baseLineShift, fsize, emSize=fsize)
+
             elif c.nodeType == c.ELEMENT_NODE and c.nodeName != "tspan":
                 continue
 
-            fragLengths.append(stringWidth(tx, ff, fs))
-            try:
-                text = ''.join([chr(ord(f)) for f in frags[-1]])
-            except ValueError:
-                text = "Unicode"
-            shape = String(x+x1, y-y1-dy0+baseLineShift, text)
+            text = unicode(text).strip()
+            shape = String(
+                (x0 + x) - (dx0 + dx) + sum(fragLengths),
+                (y0 + y) - (dy0 + dy) + baseLineShift,
+                text
+            )
+            fragLengths.append(stringWidth(text, ffamily, fsize))
+
             self.applyStyleOnShape(shape, node)
             if c.nodeType == c.ELEMENT_NODE and c.nodeName == "tspan":
                 self.applyStyleOnShape(shape, c)
-            self.updateFontFamily(shape)
+
             gr.add(shape)
 
         gr.scale(1, -1)
-        gr.translate(0, -2*y)
+        gr.translate(0, -2*y0)
 
         return gr
 
 
     def convertPath(self, node):
+        _MOVETO, _LINETO, _CURVETO, _CLOSEPATH = range(4)
         d = node.getAttribute('d')
         normPath = normaliseSvgPath(d)
         pts, ops = [], []
@@ -898,10 +971,11 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 xn, yn = nums
                 pts = pts + [xn, yn]
                 if op == 'M': 
-                    ops.append(0)
+                    if ops: ops.append(_CLOSEPATH)
+                    ops.append(_MOVETO)
                     lastMoveToOp = (op, xn, yn)
                 elif op == 'L': 
-                    ops.append(1)
+                    ops.append(_LINETO)
 
             # moveto, lineto relative
             elif op == 'm':
@@ -916,11 +990,11 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                     lastMoveToOp = (op, pts[-2], pts[-1])
                 if not lastMoveToOp:
                     lastMoveToOp = (op, xn, yn)
-                ops.append(0)
+                ops.append(_MOVETO)
             elif op == 'l':
                 xn, yn = nums
                 pts = pts + [pts[-2]+xn] + [pts[-1]+yn]
-                ops.append(1)
+                ops.append(_LINETO)
 
             # horizontal/vertical line absolute
             elif op in ('H', 'V'):
@@ -929,7 +1003,7 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                     pts = pts + [k] + [pts[-1]]
                 elif op == 'V':
                     pts = pts + [pts[-2]] + [k]
-                ops.append(1)
+                ops.append(_LINETO)
 
             # horizontal/vertical line relative
             elif op in ('h', 'v'):
@@ -938,33 +1012,33 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                     pts = pts + [pts[-2]+k] + [pts[-1]]
                 elif op == 'v':
                     pts = pts + [pts[-2]] + [pts[-1]+k]
-                ops.append(1)
+                ops.append(_LINETO)
 
             # cubic bezier, absolute
             elif op == 'C':
                 x1, y1, x2, y2, xn, yn = nums
                 pts = pts + [x1, y1, x2, y2, xn, yn]
-                ops.append(2)
+                ops.append(_CURVETO)
             elif op == 'S':
                 x2, y2, xn, yn = nums
                 xp, yp, x0, y0 = pts[-4:]
                 xi, yi = x0+(x0-xp), y0+(y0-yp)
                 # pts = pts + [xcp2, ycp2, x2, y2, xn, yn]
                 pts = pts + [xi, yi, x2, y2, xn, yn]
-                ops.append(2)
+                ops.append(_CURVETO)
 
             # cubic bezier, relative
             elif op == 'c':
                 xp, yp = pts[-2:]
                 x1, y1, x2, y2, xn, yn = nums
                 pts = pts + [xp+x1, yp+y1, xp+x2, yp+y2, xp+xn, yp+yn]
-                ops.append(2)
+                ops.append(_CURVETO)
             elif op == 's':
                 xp, yp, x0, y0 = pts[-4:]
                 xi, yi = x0+(x0-xp), y0+(y0-yp)
                 x2, y2, xn, yn = nums
                 pts = pts + [xi, yi, x0+x2, y0+y2, x0+xn, y0+yn]
-                ops.append(2)
+                ops.append(_CURVETO)
 
             # quadratic bezier, absolute
             elif op == 'Q':
@@ -974,7 +1048,7 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 (x0,y0), (x1,y1), (x2,y2), (xn,yn) = \
                     convertQuadraticToCubicPath((x0,y0), (x1,y1), (xn,yn))
                 pts = pts + [x1,y1, x2,y2, xn,yn]
-                ops.append(2)
+                ops.append(_CURVETO)
             elif op == 'T':
                 xp, yp, x0, y0 = pts[-4:]
                 xi, yi = x0+(x0-xcp), y0+(y0-ycp)
@@ -983,7 +1057,7 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 (x0,y0), (x1,y1), (x2,y2), (xn,yn) = \
                     convertQuadraticToCubicPath((x0,y0), (xi,yi), (xn,yn))
                 pts = pts + [x1,y1, x2,y2, xn,yn]
-                ops.append(2)
+                ops.append(_CURVETO)
 
             # quadratic bezier, relative
             elif op == 'q':
@@ -994,7 +1068,7 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 (x0,y0), (x1,y1), (x2,y2), (xn,yn) = \
                     convertQuadraticToCubicPath((x0,y0), (x1,y1), (xn,yn))
                 pts = pts + [x1,y1, x2,y2, xn,yn]
-                ops.append(2)
+                ops.append(_CURVETO)
             elif op == 't':
                 x0, y0 = pts[-2:]
                 xn, yn = nums
@@ -1004,11 +1078,25 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 (x0,y0), (x1,y1), (x2,y2), (xn,yn) = \
                     convertQuadraticToCubicPath((x0,y0), (xi,yi), (xn,yn))
                 pts = pts + [x1,y1, x2,y2, xn,yn]
-                ops.append(2)
+                ops.append(_CURVETO)
+
+            # elliptical arc, absolute
+            elif op == 'A':
+                points = plot_arc( *pts[-2:]+nums )
+                for ax, ay in points:
+                    pts = pts + [ax, ay]
+                    ops.append(_LINETO)
+            # elliptical arc, relative
+            elif op == 'a':
+                xn, yn = nums[-2:]
+                points = plot_arc( *pts[-2:] + nums[:-2] + [pts[-2]+xn, pts[-1]+yn] )
+                for ax, ay in points:
+                    pts = pts + [ax, ay]
+                    ops.append(_LINETO)
 
             # close path
             elif op in ('Z', 'z'):
-                ops.append(3)
+                ops.append(_CLOSEPATH)
 
             # arcs
             else: #if op in unhandledOps.keys():
@@ -1016,13 +1104,13 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                     print "Suspicious path operator:", op
                 if op in ('A', 'a'):
                     pts = pts + nums[-2:]
-                    ops.append(1)
+                    ops.append(_LINETO)
                     if LOGMESSAGES:
                         print "(Replaced with straight line)"
 
         # hack because RLG has no "semi-closed" paths...
         gr = Group()
-        if ops[-1] == 3:
+        if ops[-1] == _CLOSEPATH:
             shape1 = Path(pts, ops)
             self.applyStyleOnShape(shape1, node)
             fc = self.attrConverter.findAttr(node, "fill")
@@ -1033,7 +1121,7 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 shape1.strokeColor = None
             gr.add(shape1)
         else:
-            shape1 = Path(pts, ops+[3])
+            shape1 = Path(pts, ops+[_CLOSEPATH])
             self.applyStyleOnShape(shape1, node)
             shape1.strokeColor = None
             fc = self.attrConverter.findAttr(node, "fill")
@@ -1120,8 +1208,8 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 group.skew(values, 0)
             elif op == "skewY":
                 group.skew(0, values)
-            elif op == "matrix" and len(values) == 6:
-                group.transform = mmult(group.transform, values)
+            elif op == "matrix":
+                group.transform = values
             else:
                 if LOGMESSAGES:
                     print "Ignoring transform:", op, values
@@ -1144,8 +1232,6 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
         )
         mappingF = (
             ("font-family", "fontName", "convertFontFamily", "Helvetica"),
-            ("font-weight", "fontWeight", "convertFontWeight", ""),
-            ("font-style",  "fontStyle", "convertFontStyle", ""),
             ("font-size", "fontSize", "convertLength", "12"),
             ("text-anchor", "textAnchor", "id", "start"),
         )
@@ -1161,31 +1247,17 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                         if svgAttrValue == "currentColor":
                             svgAttrValue = ac.findAttr(node.parentNode, "color") or default
                         meth = getattr(ac, func)
-                        setattr(shape, rlgAttr, meth(svgAttrValue))
+                        value = meth(svgAttrValue)
+                        if svgAttrName in ("fill", "stroke") and svgAttrValue and (svgAttrValue != "none"):
+                            opacity = ac.findAttr(node, '%s-opacity' % svgAttrName) or u"1"
+                            value.alpha = max( 0, min( float(opacity), 1 ) )
+                        setattr(shape, rlgAttr, value)
                     except:
                         pass
 
             if shape.__class__ == String:
                 svgAttr = ac.findAttr(node, "fill") or "black"
                 setattr(shape, "fillColor", ac.convertColor(svgAttr))
-
-
-    def updateFontFamily(self, shape):
-        fontName = getattr(shape, 'fontName', None)
-        if fontName:
-            appendix = ''
-            fontWeight = getattr(shape, 'fontWeight', '')
-            fontStyle = getattr(shape, 'fontStyle', '')
-
-            if fontWeight == 'bold':
-                appendix += 'Bold'
-            if fontStyle == 'italic':
-                if fontName in ['Helvetica', 'Courier']:
-                    appendix += 'Oblique'
-                else:
-                    appendix += 'Italic'
-            if len(appendix) > 0:
-                setattr(shape, 'fontName', fontName + '-' + appendix)
 
 
 def svg2rlg(path):
