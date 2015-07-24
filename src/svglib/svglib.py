@@ -1289,3 +1289,23 @@ def svg2rlg(path):
         os.remove(path)
         
     return drawing
+
+def string2rlg(doc_string):
+    "Convert an SVG string to an RLG Drawing object."
+    
+   
+    # load SVG file
+    try:
+        doc = xml.dom.minidom.parseString(doc_string)
+        svg = doc.documentElement
+    except:
+        print "Failed to load input file!"
+        return
+
+    # convert to a RLG drawing
+    svgRenderer = SvgRenderer()
+    svgRenderer.render(svg)
+    drawing = svgRenderer.finish()
+
+        
+    return drawing
