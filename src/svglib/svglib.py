@@ -846,7 +846,7 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
                 except ValueError:
                     tx = "Unicode"
             elif c.nodeType == c.ELEMENT_NODE and c.nodeName == "tspan":
-                frags.append(c.firstChild.nodeValue)
+                frags.append(c.firstChild.nodeValue if c.firstChild else '')
                 tx = ''.join([chr(ord(f)) for f in frags[-1]])
                 getAttr = c.getAttribute
                 x1 = getAttr('x')
